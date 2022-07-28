@@ -1,5 +1,7 @@
 # dx12_present_barrier
 
+![A screenshot of the dx12_present_barrier sample running. At the top, a green bar shows that the swap barrier is in present barrier sync across systems using framelock. Green and red bars scroll across the screen in perpendicular directions. A Present Barrier Stats window in the upper left reads "SyncMode: SYNC_SYSTEM; PresentCount: 670; PresentInSyncCount: 664; FlipInSyncCount: 663; RefreshCount: 1132."](doc/dx12_present_barrier.jpg)
+
 This sample demonstrates the usage of the new NvAPI interface to synchronize
 present calls between windows on the same system as well as on distributed
 systems. It can also be used to check if systems are configured to support
@@ -7,7 +9,7 @@ synchronized present through DirectX 12 present barrier. A general overview of
 the interface can be found on the [NVIDIA developer blog](https://developer.nvidia.com/blog/synchronizing-present-calls-between-applications-on-distributed-systems-with-directx-12/).
 
 ## System Requirements
-* NVIDIA RTX / Quadro series card (Geforce is NOT supported)
+* NVIDIA RTX / Quadro series card (GeForce is NOT supported)
 * 472.12 driver or newer
 * NVAPI R470 or newer (can be downloaded from [here](https://developer.nvidia.com/nvapi))
 
@@ -30,7 +32,7 @@ A bar at the top of the window indicates the present barrier status.
 * red     - The swap chain is not in present barrier sync
 * yellow  - The swap chain is in present barrier sync with other clients on the local system
 * green   - The swap chain is in present barrier sync across systems through framelock
- 
+
 ## Build and Run
 
 Clone https://github.com/nvpro-samples/nvpro_core.git
