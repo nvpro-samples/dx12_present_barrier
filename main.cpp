@@ -106,7 +106,7 @@ bool Sample::begin()
       " Alt + W    - Reset sleep interval between presents to zero (effectively disabling it)\n"
       " Shift + W  - Decrease sleep interval between presents by 1ms\n"
       //" F          - Toggle fullscreen mode\n"
-      //" B          - Toggle borderless window fullscreen mode\n"
+      " B          - Toggle borderless window fullscreen mode\n"
       " 2          - Toggle stereoscopic rendering\n"
       "\n"
       "The bar at the top of the window indicates the present barrier status:\n"
@@ -114,7 +114,9 @@ bool Sample::begin()
       " yellow     - The swap chain is in present barrier sync with other clients on the local system\n"
       " green      - The swap chain is in present barrier sync across systems through framelock\n"
       "\n");
-  return m_renderThread.start(m_initialConfig, this, getWidth(), getHeight());
+  m_initialConfig.m_winSize[0] = m_windowState.m_winSize[0];
+  m_initialConfig.m_winSize[1] = m_windowState.m_winSize[1];
+  return m_renderThread.start(m_initialConfig, this);
 }
 
 void Sample::think(double time)
@@ -146,7 +148,7 @@ void Sample::think(double time)
   }
   if(m_windowState.onPress(KEY_B))
   {
-    //m_renderThread.requestBorderlessStateChange();
+    m_renderThread.requestBorderlessStateChange();
   }
   if(m_windowState.onPress(KEY_S))
   {
@@ -213,5 +215,5 @@ int main(int argc, const char** argv)
   NVPSystem system(PROJECT_NAME);
 
   Sample sample;
-  return sample.run(PROJECT_NAME, argc, argv, SAMPLE_WINDOWED_WIDTH, SAMPLE_WINDOWED_HEIGHT, false);
+  return sample.run(PROJECT_NAME, argc, argv, 800, 600, false);
 }

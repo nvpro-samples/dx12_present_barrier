@@ -33,7 +33,7 @@ RenderThread::RenderThread()
 {
 }
 
-bool RenderThread::start(Configuration const& initialConfig, WindowCallback* windowCallback, unsigned int initialWidth, unsigned int initialHeight)
+bool RenderThread::start(Configuration const& initialConfig, WindowCallback* windowCallback)
 {
   m_config         = initialConfig;
   m_windowCallback = windowCallback;
@@ -41,10 +41,10 @@ bool RenderThread::start(Configuration const& initialConfig, WindowCallback* win
   bool             success = false;
   std::unique_lock lock(m_mutex);
 
-  m_thread = std::thread([this, &success, initialWidth, initialHeight]() {
+  m_thread = std::thread([this, &success, &initialConfig]() {
     {
       std::unique_lock lock(m_mutex);
-      success = init(initialWidth, initialHeight);
+      success = init(initialConfig.m_winSize[0], initialConfig.m_winSize[1]);
       m_conVar.notify_all();
     }
     if(success)
@@ -1059,8 +1059,8 @@ void RenderThread::setDisplayMode(DisplayMode displayMode)
       // Move the window a little away from the corner of the output
       x += 128;
       y += 160;
-      modeDesc.Width  = SAMPLE_WINDOWED_WIDTH;
-      modeDesc.Height = SAMPLE_WINDOWED_HEIGHT;
+      modeDesc.Width  = m_config.m_winSize[0];
+      modeDesc.Height = m_config.m_winSize[1];
       m_windowCallback->setDecorated(true);
     }
 

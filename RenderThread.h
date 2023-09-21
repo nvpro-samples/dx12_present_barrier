@@ -17,9 +17,6 @@ using Microsoft::WRL::ComPtr;
 
 #include <nvapi.h>
 
-int const SAMPLE_WINDOWED_WIDTH  = 800;
-int const SAMPLE_WINDOWED_HEIGHT = 600;
-
 enum class DisplayMode
 {
   WINDOWED,
@@ -45,6 +42,7 @@ struct Configuration
   std::uint32_t m_lineSizeInPixels[2]         = {1, 54};
   std::uint32_t m_syncTimeoutMillis           = 1000;
   std::int32_t  m_outputIndex                 = -1;
+  std::uint32_t m_winSize[2];
 };
 
 // window attributes can only be changed from window-owning thread
@@ -63,7 +61,7 @@ public:
   RenderThread();
   ~RenderThread() {}
 
-  bool start(Configuration const& initialConfig, WindowCallback* windowCallback, unsigned int initialWidth, unsigned int initialHeight);
+  bool start(Configuration const& initialConfig, WindowCallback* windowCallback);
   void interruptAndJoin();
   void setDisplayMode(DisplayMode displayMode);
   void setSleepInterval(std::uint32_t millis);
