@@ -1,3 +1,5 @@
 .vs/
 build/
 .vscode/
+imgui.ini
+log_dx12_present_barrier.txt
