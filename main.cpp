@@ -2,12 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <RenderThread.h>
+#include <version.h>
 
 #include <GLFW/glfw3.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
 
 #include <optional>
+
+#define STRINGIFY(_x) #_x
 
 class Sample : public nvh::AppWindowProfiler, private WindowCallback
 {
@@ -96,6 +99,10 @@ bool Sample::begin()
 
   LOGI(
       "\n"
+      "Version %d.%d"
+      "\n"
+      "build " BUILD_STRING "%s"
+      "\n\n"
       "Keyboard shortcuts:\n"
       " V          - Toggle vsync\n"
       " S          - Toggle scrolling of the lines\n"
@@ -113,7 +120,8 @@ bool Sample::begin()
       " red        - The swap chain is not in present barrier sync\n"
       " yellow     - The swap chain is in present barrier sync with other clients on the local system\n"
       " green      - The swap chain is in present barrier sync across systems through framelock\n"
-      "\n");
+      "\n",
+      VERSION_MAJOR, VERSION_MINOR, BUILD_UNCOMMITTED_CHANGES ? " (modified)" : "");
   m_initialConfig.m_winSize[0] = m_windowState.m_winSize[0];
   m_initialConfig.m_winSize[1] = m_windowState.m_winSize[1];
   return m_renderThread.start(m_initialConfig, this);

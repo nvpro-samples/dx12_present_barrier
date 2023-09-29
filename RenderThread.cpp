@@ -662,17 +662,17 @@ void RenderThread::swapResize(int width, int height, bool stereo, bool force)
     m_swapChain.Reset();
 
     DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
-    swapChainDesc.Width       = width;
-    swapChainDesc.Height      = height;
-    swapChainDesc.Format      = BACK_BUFFER_FORMAT;
-    swapChainDesc.Stereo      = stereo;
-    swapChainDesc.SampleDesc  = {1, 0};
-    swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swapChainDesc.BufferCount = D3D12_SWAP_CHAIN_SIZE;
-    swapChainDesc.Scaling     = DXGI_SCALING_NONE;
-    swapChainDesc.SwapEffect  = stereo ? DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL : DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    swapChainDesc.AlphaMode   = DXGI_ALPHA_MODE_UNSPECIFIED;
-    swapChainDesc.Flags       = swapFlags;
+    swapChainDesc.Width                 = width;
+    swapChainDesc.Height                = height;
+    swapChainDesc.Format                = BACK_BUFFER_FORMAT;
+    swapChainDesc.Stereo                = stereo;
+    swapChainDesc.SampleDesc            = {1, 0};
+    swapChainDesc.BufferUsage           = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapChainDesc.BufferCount           = D3D12_SWAP_CHAIN_SIZE;
+    swapChainDesc.Scaling               = DXGI_SCALING_NONE;
+    swapChainDesc.SwapEffect            = stereo ? DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL : DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    swapChainDesc.AlphaMode             = DXGI_ALPHA_MODE_UNSPECIFIED;
+    swapChainDesc.Flags                 = swapFlags;
 
     ComPtr<IDXGISwapChain1> swapChain1;
     HR_CHECK(m_context.m_factory->CreateSwapChainForHwnd(m_commandQueues[0].Get(), m_windowCallback->getWindowHandle(),
@@ -739,18 +739,18 @@ void RenderThread::swapResize(int width, int height, bool stereo, bool force)
       rtvDesc.ViewDimension                  = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
       rtvDesc.Texture2DArray.MipSlice        = 0;
       rtvDesc.Texture2DArray.FirstArraySlice = 0;
-      rtvDesc.Texture2DArray.ArraySize       = 0;
+      rtvDesc.Texture2DArray.ArraySize       = 1;
       rtvDesc.Texture2DArray.PlaneSlice      = 0;
     }
 
     CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeaps[nodeIndex]->GetCPUDescriptorHandleForHeapStart(), rtvIndex, rtvIncrement);
-    m_context.m_device->CreateRenderTargetView(m_backBufferResources[i].Get(), nullptr, rtvHandle);
+    m_context.m_device->CreateRenderTargetView(m_backBufferResources[i].Get(), &rtvDesc, rtvHandle);
 
     if(m_config.m_stereo)
     {
       rtvDesc.Texture2DArray.FirstArraySlice = 1;
       CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandleRight(rtvHandle, D3D12_SWAP_CHAIN_SIZE, rtvIncrement);
-      m_context.m_device->CreateRenderTargetView(m_backBufferResources[i].Get(), nullptr, rtvHandleRight);
+      m_context.m_device->CreateRenderTargetView(m_backBufferResources[i].Get(), &rtvDesc, rtvHandleRight);
     }
   }
 
@@ -929,45 +929,47 @@ void RenderThread::prepareGui()
   ImGui::Begin("Present barrier stats");
   ImGui::SetWindowSize({240, 120});
   ImGui::SetWindowPos({0, 0});
-  ImGui::BeginTable("table", 2, ImGuiTableFlags_SizingStretchProp);
-  ImGui::TableNextColumn();
-  ImGui::Text("SyncMode");
-  ImGui::TableNextColumn();
-  switch(m_presentBarrierFrameStats.SyncMode)
+  if(ImGui::BeginTable("table", 2, ImGuiTableFlags_SizingStretchProp))
   {
-    case PRESENT_BARRIER_NOT_JOINED:
-      ImGui::Text("NOT_JOINED");
-      break;
-    case PRESENT_BARRIER_SYNC_CLIENT:
-      ImGui::Text("SYNC_CLIENT");
-      break;
-    case PRESENT_BARRIER_SYNC_SYSTEM:
-      ImGui::Text("SYNC_SYSTEM");
-      break;
-    case PRESENT_BARRIER_SYNC_CLUSTER:
-      ImGui::Text("SYNC_CLUSTER");
-      break;
-    default:
-      ImGui::Text("0x%08x", m_presentBarrierFrameStats.SyncMode);
-      break;
+    ImGui::TableNextColumn();
+    ImGui::Text("SyncMode");
+    ImGui::TableNextColumn();
+    switch(m_presentBarrierFrameStats.SyncMode)
+    {
+      case PRESENT_BARRIER_NOT_JOINED:
+        ImGui::Text("NOT_JOINED");
+        break;
+      case PRESENT_BARRIER_SYNC_CLIENT:
+        ImGui::Text("SYNC_CLIENT");
+        break;
+      case PRESENT_BARRIER_SYNC_SYSTEM:
+        ImGui::Text("SYNC_SYSTEM");
+        break;
+      case PRESENT_BARRIER_SYNC_CLUSTER:
+        ImGui::Text("SYNC_CLUSTER");
+        break;
+      default:
+        ImGui::Text("0x%08x", m_presentBarrierFrameStats.SyncMode);
+        break;
+    }
+    ImGui::TableNextColumn();
+    ImGui::Text("PresentCount");
+    ImGui::TableNextColumn();
+    ImGui::Text("%d", m_presentBarrierFrameStats.PresentCount);
+    ImGui::TableNextColumn();
+    ImGui::Text("PresentInSyncCount");
+    ImGui::TableNextColumn();
+    ImGui::Text("%d", m_presentBarrierFrameStats.PresentInSyncCount);
+    ImGui::TableNextColumn();
+    ImGui::Text("FlipInSyncCount");
+    ImGui::TableNextColumn();
+    ImGui::Text("%d", m_presentBarrierFrameStats.FlipInSyncCount);
+    ImGui::TableNextColumn();
+    ImGui::Text("RefreshCount");
+    ImGui::TableNextColumn();
+    ImGui::Text("%d", m_presentBarrierFrameStats.RefreshCount);
+    ImGui::EndTable();
   }
-  ImGui::TableNextColumn();
-  ImGui::Text("PresentCount");
-  ImGui::TableNextColumn();
-  ImGui::Text("%d", m_presentBarrierFrameStats.PresentCount);
-  ImGui::TableNextColumn();
-  ImGui::Text("PresentInSyncCount");
-  ImGui::TableNextColumn();
-  ImGui::Text("%d", m_presentBarrierFrameStats.PresentInSyncCount);
-  ImGui::TableNextColumn();
-  ImGui::Text("FlipInSyncCount");
-  ImGui::TableNextColumn();
-  ImGui::Text("%d", m_presentBarrierFrameStats.FlipInSyncCount);
-  ImGui::TableNextColumn();
-  ImGui::Text("RefreshCount");
-  ImGui::TableNextColumn();
-  ImGui::Text("%d", m_presentBarrierFrameStats.RefreshCount);
-  ImGui::EndTable();
   ImGui::End();
 
   ImGui::Render();
@@ -1115,6 +1117,9 @@ void RenderThread::end()
   m_frameFence.Reset();
   m_presentBarrierFence.Reset();
   m_backBufferResources.clear();
+  for(auto queue : m_commandQueues) {
+    queue->Release();
+  }
   m_commandQueues.clear();
   m_swapChain.Reset();
   m_context.deinit();
