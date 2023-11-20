@@ -24,8 +24,6 @@
 #define CHECK_NV(status) status
 #endif
 
-//#define DISABLE_PRESENT_BARRIER
-
 #define BACK_BUFFER_FORMAT DXGI_FORMAT_R8G8B8A8_UNORM
 
 RenderThread::RenderThread()
@@ -124,15 +122,16 @@ bool RenderThread::init(unsigned int initialWidth, unsigned int initialHeight)
   }
 
   CHECK_NV(NvAPI_Initialize());
-#ifndef DISABLE_PRESENT_BARRIER
-  // Check whether the system supports present barrier (Quadro + driver with support)
-  bool presentBarrierSupported = false;
-  if(NvAPI_D3D12_QueryPresentBarrierSupport(m_context.m_device, &presentBarrierSupported) != NVAPI_OK || !presentBarrierSupported)
+  if(!m_config.m_disablePresentBarrier)
   {
-    LOGE("Present barrier is not supported on this system\n");
-    return false;
+    // Check whether the system supports present barrier (Quadro + driver with support)
+    bool presentBarrierSupported = false;
+    if(NvAPI_D3D12_QueryPresentBarrierSupport(m_context.m_device, &presentBarrierSupported) != NVAPI_OK || !presentBarrierSupported)
+    {
+      LOGE("Present barrier is not supported on this system\n");
+      return false;
+    }
   }
-#endif
 
   const UINT nodeCount   = m_context.m_device->GetNodeCount();
   const UINT nodeMaskAll = (1 << nodeCount) - 1;
@@ -483,8 +482,7 @@ void RenderThread::swapBuffers()
     m_swapChain->Present(m_syncInterval, 0);
     HR_CHECK(m_commandQueues[currentNodeIdx]->Signal(m_frameFence.Get(), m_frameIdx));
 
-#ifndef DISABLE_PRESENT_BARRIER
-    if(m_presentBarrierJoined)
+    if(!m_config.m_disablePresentBarrier && m_presentBarrierJoined)
     {
       CHECK_NV(NvAPI_QueryPresentBarrierFrameStatistics(m_presentBarrierClient, &m_presentBarrierFrameStats));
 
@@ -503,7 +501,6 @@ void RenderThread::swapBuffers()
         m_frameCounterFile << m_presentBarrierFrameStats.PresentCount << std::endl;
       }
     }
-#endif
     std::lock_guard guard(m_mutex);
     if(m_requestToggleStereo)
     {
@@ -621,20 +618,21 @@ bool RenderThread::requestPresentBarrierChange(std::uint32_t maxWaitMillis)
 
 void RenderThread::forcePresentBarrierChange()
 {
-#ifndef DISABLE_PRESENT_BARRIER
-  if(!m_presentBarrierJoined)
+  if(!m_config.m_disablePresentBarrier)
   {
-    NV_JOIN_PRESENT_BARRIER_PARAMS params = {};
-    params.dwVersion                      = NV_JOIN_PRESENT_BARRIER_PARAMS_VER1;
-    CHECK_NV(NvAPI_JoinPresentBarrier(m_presentBarrierClient, &params));
-    m_presentBarrierJoined = true;
+    if(!m_presentBarrierJoined)
+    {
+      NV_JOIN_PRESENT_BARRIER_PARAMS params = {};
+      params.dwVersion                      = NV_JOIN_PRESENT_BARRIER_PARAMS_VER1;
+      CHECK_NV(NvAPI_JoinPresentBarrier(m_presentBarrierClient, &params));
+      m_presentBarrierJoined = true;
+    }
+    else
+    {
+      CHECK_NV(NvAPI_LeavePresentBarrier(m_presentBarrierClient));
+      m_presentBarrierJoined = false;
+    }
   }
-  else
-  {
-    CHECK_NV(NvAPI_LeavePresentBarrier(m_presentBarrierClient));
-    m_presentBarrierJoined = false;
-  }
-#endif
 }
 
 void RenderThread::swapResize(int width, int height, bool stereo, bool force)
@@ -681,11 +679,12 @@ void RenderThread::swapResize(int width, int height, bool stereo, bool force)
 
     m_config.m_stereo = stereo;
 
-#ifndef DISABLE_PRESENT_BARRIER
-    releasePresentBarrier();
+    if(!m_config.m_disablePresentBarrier)
+    {
+      releasePresentBarrier();
 
-    CHECK_NV(NvAPI_D3D12_CreatePresentBarrierClient(m_context.m_device, m_swapChain.Get(), &m_presentBarrierClient));
-#endif
+      CHECK_NV(NvAPI_D3D12_CreatePresentBarrierClient(m_context.m_device, m_swapChain.Get(), &m_presentBarrierClient));
+    }
   }
   else if(!m_config.m_alternateFrameRendering)
   {
@@ -781,17 +780,18 @@ void RenderThread::swapResize(int width, int height, bool stereo, bool force)
       D3D12_SWAP_CHAIN_SIZE * 2 * m_context.m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
   m_context.m_device->CreateRenderTargetView(m_guiTexture.Get(), &guiTexRtvDesc, guiRtvCpuHandle);
 
-#ifndef DISABLE_PRESENT_BARRIER
-  assert(m_presentBarrierClient && m_presentBarrierFence && !m_backBufferResources.empty());
+  if(!m_config.m_disablePresentBarrier)
+  {
+    assert(m_presentBarrierClient && m_presentBarrierFence && !m_backBufferResources.empty());
 
-  std::vector<ID3D12Resource*> rawBackBuffers(m_backBufferResources.size());
-  std::transform(m_backBufferResources.begin(), m_backBufferResources.end(), rawBackBuffers.begin(),
-                 [](auto b) { return b.Get(); });
+    std::vector<ID3D12Resource*> rawBackBuffers(m_backBufferResources.size());
+    std::transform(m_backBufferResources.begin(), m_backBufferResources.end(), rawBackBuffers.begin(),
+                   [](auto b) { return b.Get(); });
 
-  // Register the new back buffer resources
-  CHECK_NV(NvAPI_D3D12_RegisterPresentBarrierResources(m_presentBarrierClient, m_presentBarrierFence.Get(),
-                                                       rawBackBuffers.data(), static_cast<NvU32>(m_backBufferResources.size())));
-#endif
+    // Register the new back buffer resources
+    CHECK_NV(NvAPI_D3D12_RegisterPresentBarrierResources(m_presentBarrierClient, m_presentBarrierFence.Get(),
+                                                         rawBackBuffers.data(), static_cast<NvU32>(m_backBufferResources.size())));
+  }
 }
 
 void RenderThread::toggleStereo()
@@ -1078,8 +1078,7 @@ void RenderThread::setDisplayMode(DisplayMode displayMode)
 
 void RenderThread::releasePresentBarrier()
 {
-#ifndef DISABLE_PRESENT_BARRIER
-  if(m_presentBarrierClient)
+  if(!m_config.m_disablePresentBarrier && m_presentBarrierClient)
   {
     if(m_presentBarrierJoined)
     {
@@ -1089,7 +1088,6 @@ void RenderThread::releasePresentBarrier()
     CHECK_NV(NvAPI_DestroyPresentBarrierClient(m_presentBarrierClient));
     m_presentBarrierClient = nullptr;
   }
-#endif
 }
 
 void RenderThread::end()
@@ -1117,7 +1115,8 @@ void RenderThread::end()
   m_frameFence.Reset();
   m_presentBarrierFence.Reset();
   m_backBufferResources.clear();
-  for(auto queue : m_commandQueues) {
+  for(auto queue : m_commandQueues)
+  {
     queue->Release();
   }
   m_commandQueues.clear();

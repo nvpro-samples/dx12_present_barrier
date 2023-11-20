@@ -30,6 +30,7 @@ struct Configuration
   std::string   m_testMode                    = "n";
   std::string   m_frameCounterFilePath        = "";
   bool          m_alternateFrameRendering     = false;
+  bool          m_disablePresentBarrier       = false;
   bool          m_stereo                      = false;
   bool          m_showVerticalLines           = true;
   bool          m_showHorizontalLines         = true;

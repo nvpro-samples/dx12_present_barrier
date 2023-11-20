@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.5)
 
 get_filename_component(PROJNAME ${CMAKE_CURRENT_SOURCE_DIR} NAME)
-Project(${PROJNAME} VERSION 1.0)
+Project(${PROJNAME} VERSION 1.1)
 Message(STATUS "-------------------------------")
 Message(STATUS "Processing Project ${PROJNAME}:")
 
@@ -57,11 +57,10 @@ if(NVAPI_INCLUDE_DIRS)
     endif()
   endif()
 else(NVAPI_INCLUDE_DIRS)
-  message(WARNING "NVAPI not found! Skipping over dx12_present_barrier.
+  message(FATAL_ERROR "NVAPI not found!
 You can specify the location of the NVAPI directory with a NVAPI_LOCATION variable. The directory should contain:
   - nvapi.h header file
   - amd64/x86 folders containing nvapi[64].lib")
-  return()
 endif(NVAPI_INCLUDE_DIRS)
 
 if(NVAPI_FOUND)

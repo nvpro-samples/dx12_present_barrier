@@ -62,6 +62,7 @@ Sample::Sample()
   m_parameterList.add("a|Same as -adapter", &m_renderThread.contextInfo().compatibleAdapterIndex);
   m_parameterList.add("afr|Alternate frame rendering when SLI is enabled", &m_initialConfig.m_alternateFrameRendering);
   m_parameterList.add("listadapters|Print available adapters", &m_renderThread.contextInfo().verboseCompatibleAdapters);
+  m_parameterList.add("dpb|Disable present barrier", &m_initialConfig.m_disablePresentBarrier);
   m_parameterList.add("stereo|Stereoscopic rendering", &m_initialConfig.m_stereo);
 
   m_parameterList.add("lines|Set number of scrolling lines to show", &m_initialConfig.m_numLines);
