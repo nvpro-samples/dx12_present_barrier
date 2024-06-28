@@ -26,54 +26,55 @@
 
 #define BACK_BUFFER_FORMAT DXGI_FORMAT_R8G8B8A8_UNORM
 
-RenderThread::RenderThread()
-    : m_interrupted(false)
-{
-}
+RenderThread::RenderThread() {}
 
 bool RenderThread::start(Configuration const& initialConfig, WindowCallback* windowCallback)
 {
   m_config         = initialConfig;
   m_windowCallback = windowCallback;
 
-  bool             success = false;
   std::unique_lock lock(m_mutex);
-
-  m_thread = std::thread([this, &success, &initialConfig]() {
+  m_thread = std::thread([this]() {
     {
       std::unique_lock lock(m_mutex);
-      success = init(initialConfig.m_winSize[0], initialConfig.m_winSize[1]);
-      m_conVar.notify_all();
+      if(!init(m_config.m_winSize[0], m_config.m_winSize[1]))
+      {
+        setStatus(Status::INITIAZATION_ERROR);
+        return;
+      }
+      setStatus(Status::RUNNING);
     }
-    if(success)
+    while(!isInterrupted())
     {
-      run();
+      waitIfPaused();
+      renderFrame();
+      swapBuffers();
     }
+    sync();
+    end();
   });
 
-  m_conVar.wait(lock);
-  return success;
+  m_conVar.wait(lock, [this]() { return m_status != Status::CREATED; });
+  return m_status != Status::INITIAZATION_ERROR;
 }
 
-void RenderThread::run()
+void RenderThread::setStatus(Status newStatus)
 {
-  while(!isInterrupted())
+  if(m_status != newStatus)
   {
-    renderFrame();
-    swapBuffers();
+    m_status = newStatus;
+    m_conVar.notify_all();
   }
-  sync();
-  end();
 }
 
 void RenderThread::interruptAndJoin()
 {
   {
     std::lock_guard guard(m_mutex);
-    m_interrupted = true;
+    setStatus(Status::INTERRUPTED);
     if(m_displayMode == DisplayMode::FULLSCREEN)
     {
-      setDisplayMode(DisplayMode::WINDOWED);
+      trySetDisplayMode(DisplayMode::WINDOWED);
     }
   }
   m_thread.join();
@@ -82,12 +83,36 @@ void RenderThread::interruptAndJoin()
 bool RenderThread::isInterrupted()
 {
   std::lock_guard guard(m_mutex);
-  return m_interrupted;
+  return m_status == Status::INTERRUPTED;
+}
+
+void RenderThread::togglePaused()
+{
+  std::lock_guard guard(m_mutex);
+  switch(m_status)
+  {
+    case Status::RUNNING:
+      setStatus(Status::PAUSED);
+      break;
+    case Status::PAUSED:
+      setStatus(Status::RUNNING);
+      break;
+    default:
+      LOGE("Pause toggling impossible in current state.\n");
+  }
+}
+
+void RenderThread::waitIfPaused()
+{
+  std::unique_lock lock(m_mutex);
+  if(m_status == Status::PAUSED)
+  {
+    m_conVar.wait(lock, [this]() { return m_status != Status::PAUSED; });
+  }
 }
 
 bool RenderThread::init(unsigned int initialWidth, unsigned int initialHeight)
 {
-
   if(m_config.m_testMode == "f" && m_config.m_startupDisplayMode == "b")
   {
     LOGE("Display mode must not be borderless when using fullscreen transition test mode.");
@@ -133,28 +158,6 @@ bool RenderThread::init(unsigned int initialWidth, unsigned int initialHeight)
     }
   }
 
-  const UINT nodeCount   = m_context.m_device->GetNodeCount();
-  const UINT nodeMaskAll = (1 << nodeCount) - 1;
-
-  // Create command queue for each node in the device
-  m_commandQueues.push_back(m_context.m_commandQueue);
-  m_context.m_commandQueue->AddRef();
-  if(m_config.m_alternateFrameRendering)
-  {
-    for(UINT i = 1; i < nodeCount; ++i)
-    {
-      D3D12_COMMAND_QUEUE_DESC desc;
-      desc.Type     = D3D12_COMMAND_LIST_TYPE_DIRECT;
-      desc.Priority = 0;
-      desc.Flags    = D3D12_COMMAND_QUEUE_FLAG_NONE;
-      desc.NodeMask = 1 << i;
-
-      ComPtr<ID3D12CommandQueue> queue;
-      HR_CHECK(m_context.m_device->CreateCommandQueue(&desc, IID_PPV_ARGS(&queue)));
-      m_commandQueues.push_back(queue);
-    }
-  }
-
   // Create fence and event used for context synchronization
   HR_CHECK(m_context.m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_frameFence)));
   HR_CHECK(m_context.m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_presentBarrierFence)));
@@ -166,22 +169,16 @@ bool RenderThread::init(unsigned int initialWidth, unsigned int initialHeight)
   }
 
   // Create descriptor heaps
-  m_rtvHeaps.resize(nodeCount, nullptr);
-  m_cbvSrvUavHeaps.resize(nodeCount, nullptr);
-  for(UINT i = 0; i < nodeCount; ++i)
-  {
-    D3D12_DESCRIPTOR_HEAP_DESC descriptorHeapDesc = {};
-    descriptorHeapDesc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    descriptorHeapDesc.NumDescriptors             = D3D12_SWAP_CHAIN_SIZE * 2 + 1;
-    descriptorHeapDesc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-    descriptorHeapDesc.NodeMask                   = 1 << i;
-    HR_CHECK(m_context.m_device->CreateDescriptorHeap(&descriptorHeapDesc, IID_PPV_ARGS(&m_rtvHeaps[i])));
+  D3D12_DESCRIPTOR_HEAP_DESC descriptorHeapDesc = {};
+  descriptorHeapDesc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  descriptorHeapDesc.NumDescriptors             = D3D12_SWAP_CHAIN_SIZE * 2 + 1;
+  descriptorHeapDesc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+  HR_CHECK(m_context.m_device->CreateDescriptorHeap(&descriptorHeapDesc, IID_PPV_ARGS(&m_rtvHeap)));
 
-    descriptorHeapDesc.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    descriptorHeapDesc.NumDescriptors = i == 0 ? 2 : 1;
-    descriptorHeapDesc.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    HR_CHECK(m_context.m_device->CreateDescriptorHeap(&descriptorHeapDesc, IID_PPV_ARGS(&m_cbvSrvUavHeaps[i])));
-  }
+  descriptorHeapDesc.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  descriptorHeapDesc.NumDescriptors = 2;
+  descriptorHeapDesc.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  HR_CHECK(m_context.m_device->CreateDescriptorHeap(&descriptorHeapDesc, IID_PPV_ARGS(&m_cbvSrvUavHeap)));
 
   // Create swap chain
   swapResize(initialWidth, initialHeight, m_config.m_stereo, true);
@@ -206,23 +203,20 @@ bool RenderThread::init(unsigned int initialWidth, unsigned int initialHeight)
   }
 
   // Create command allocators and a single list which will be re-used every frame
-  m_commandAllocators.resize(m_backBufferResources.size(), nullptr);
+  m_graphicsCommandAllocators.resize(m_backBufferResources.size(), nullptr);
   m_guiCommandAllocators.resize(m_backBufferResources.size(), nullptr);
   m_allocatorFrameIndices.resize(m_backBufferResources.size(), 0);
-  for(UINT i = 0; i < m_commandAllocators.size(); ++i)
+  for(UINT i = 0; i < m_graphicsCommandAllocators.size(); ++i)
   {
-    HR_CHECK(m_context.m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_commandAllocators[i])));
+    HR_CHECK(m_context.m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                        IID_PPV_ARGS(&m_graphicsCommandAllocators[i])));
     HR_CHECK(m_context.m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_guiCommandAllocators[i])));
   }
 
-  m_commandLists.resize(nodeCount);
   ID3D12Device4* device4 = nullptr;
   HR_CHECK(m_context.m_device->QueryInterface(&device4));
-  for(UINT node = 0; node < nodeCount; ++node)
-  {
-    HR_CHECK(device4->CreateCommandList1(1 << node, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_FLAG_NONE,
-                                         IID_PPV_ARGS(&m_commandLists[node])));
-  }
+  HR_CHECK(device4->CreateCommandList1(1, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_FLAG_NONE,
+                                       IID_PPV_ARGS(&m_graphicsCommandList)));
   HR_CHECK(device4->CreateCommandList1(1, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_FLAG_NONE,
                                        IID_PPV_ARGS(&m_guiCommandList)));
 
@@ -235,8 +229,25 @@ bool RenderThread::init(unsigned int initialWidth, unsigned int initialHeight)
   CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc(ARRAYSIZE(rootParameters), rootParameters);
 
   ComPtr<ID3DBlob> rootSignatureBlob;
-  HR_CHECK(D3D12SerializeVersionedRootSignature(&rootSignatureDesc, &rootSignatureBlob, nullptr));
-  HR_CHECK(m_context.m_device->CreateRootSignature(nodeMaskAll, rootSignatureBlob->GetBufferPointer(),
+  ComPtr<ID3DBlob> rootSignatureErrorBlob;
+  HRESULT rootSignatureHr = D3D12SerializeVersionedRootSignature(&rootSignatureDesc, &rootSignatureBlob, &rootSignatureErrorBlob);
+  if(rootSignatureErrorBlob)
+  {
+    std::string errorStr = std::string(static_cast<char const*>(rootSignatureErrorBlob->GetBufferPointer()),
+                                       static_cast<char const*>(rootSignatureErrorBlob->GetBufferPointer())
+                                           + rootSignatureErrorBlob->GetBufferSize())
+                           + "\n";
+    if(rootSignatureHr == S_OK)
+    {
+      LOGW(errorStr.c_str());
+    }
+    else
+    {
+      LOGE(errorStr.c_str());
+    }
+  }
+  HR_CHECK(rootSignatureHr);
+  HR_CHECK(m_context.m_device->CreateRootSignature(1, rootSignatureBlob->GetBufferPointer(),
                                                    rootSignatureBlob->GetBufferSize(), IID_PPV_ARGS(&m_rootSignature)));
 
   // Create graphics pipeline for line rendering (using simple quads rendered from triangle strips)
@@ -272,7 +283,7 @@ bool RenderThread::init(unsigned int initialWidth, unsigned int initialHeight)
   pipelineStateDesc.m_depthStencil      = depthStencilDesc;
   pipelineStateDesc.m_primitiveTopology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   pipelineStateDesc.m_renderTargets     = renderTargets;
-  pipelineStateDesc.m_nodeMask          = nodeMaskAll;
+  pipelineStateDesc.m_nodeMask          = 1;
   HR_CHECK(device4->CreatePipelineState(&pipelineStateStreamDesc, IID_PPV_ARGS(&m_linesPipeline)));
 
   // Create graphics pipeline for present barrier status indicator
@@ -295,11 +306,17 @@ bool RenderThread::init(unsigned int initialWidth, unsigned int initialHeight)
   // Switch into fullscreen (which is required for present barrier to work)
   if(m_config.m_startupDisplayMode == "b" || m_config.m_startupDisplayMode == "borderless")
   {
-    setDisplayMode(DisplayMode::BORDERLESS);
+    if(trySetDisplayMode(DisplayMode::BORDERLESS) != DisplayMode::BORDERLESS)
+    {
+      LOGW("Failed to set borderless display mode.\n");
+    }
   }
   else if(m_config.m_startupDisplayMode == "f" || m_config.m_startupDisplayMode == "fullscreen")
   {
-    setDisplayMode(DisplayMode::FULLSCREEN);
+    if(trySetDisplayMode(DisplayMode::FULLSCREEN) != DisplayMode::FULLSCREEN)
+    {
+      LOGW("Failed to set borderless fullscreen mode.\n");
+    }
   }
   else if(m_config.m_startupDisplayMode != "w" && m_config.m_startupDisplayMode != "windowed")
   {
@@ -322,12 +339,12 @@ bool RenderThread::init(unsigned int initialWidth, unsigned int initialHeight)
     LOGE("ImGui_ImplGlfw_InitForOther() failed.\n");
     return false;
   }
-  auto guiCpuHandle = m_cbvSrvUavHeaps.front()->GetCPUDescriptorHandleForHeapStart();
+  auto guiCpuHandle = m_cbvSrvUavHeap->GetCPUDescriptorHandleForHeapStart();
   guiCpuHandle.ptr += m_context.m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-  auto guiGpuHandle = m_cbvSrvUavHeaps.front()->GetGPUDescriptorHandleForHeapStart();
+  auto guiGpuHandle = m_cbvSrvUavHeap->GetGPUDescriptorHandleForHeapStart();
   guiGpuHandle.ptr += m_context.m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-  if(!ImGui_ImplDX12_Init(m_context.m_device, static_cast<int>(m_commandAllocators.size()), BACK_BUFFER_FORMAT,
-                          m_cbvSrvUavHeaps.front().Get(), guiCpuHandle, guiGpuHandle))
+  if(!ImGui_ImplDX12_Init(m_context.m_device, static_cast<int>(m_graphicsCommandAllocators.size()), BACK_BUFFER_FORMAT,
+                          m_cbvSrvUavHeap.Get(), guiCpuHandle, guiGpuHandle))
   {
     LOGE("ImGui_ImplDX12_Init() failed.\n");
     return false;
@@ -365,6 +382,10 @@ void RenderThread::renderFrame()
   {
     m_frameCount++;
   }
+  if(!m_config.m_scrolling)
+  {
+    ++m_linesPosOffset;
+  }
 
   m_mutex.lock();
   std::uint32_t sleepIntervalMillis = m_config.m_sleepIntervalInMilliseconds;
@@ -399,43 +420,37 @@ void RenderThread::renderFrame()
   }
   m_skipNextSwap = false;
 
-  std::uint32_t currentNodeIdx = m_swapChain->GetCurrentBackBufferIndex() % m_context.m_device->GetNodeCount();
-
   // Begin recording command list
-  ComPtr<ID3D12CommandAllocator>    commandAllocator = m_commandAllocators[m_swapChain->GetCurrentBackBufferIndex()];
-  ComPtr<ID3D12GraphicsCommandList> commandList      = m_commandLists[currentNodeIdx];
+  ComPtr<ID3D12CommandAllocator> commandAllocator = m_graphicsCommandAllocators[m_swapChain->GetCurrentBackBufferIndex()];
   HR_CHECK(commandAllocator->Reset());
-  HR_CHECK(commandList->Reset(commandAllocator.Get(), m_linesPipeline.Get()));
-  auto cbvSrvUavHeap = m_cbvSrvUavHeaps[currentNodeIdx].Get();
-  commandList->SetDescriptorHeaps(1, &cbvSrvUavHeap);
+  HR_CHECK(m_graphicsCommandList->Reset(commandAllocator.Get(), m_linesPipeline.Get()));
+  auto cbvSrvUavHeap = m_cbvSrvUavHeap.Get();
+  m_graphicsCommandList->SetDescriptorHeaps(1, &cbvSrvUavHeap);
+
+  ComPtr<ID3D12Resource>       currentBackBuffer = m_backBufferResources[m_swapChain->GetCurrentBackBufferIndex()];
+  const D3D12_RESOURCE_BARRIER presentToRenderTarget =
+      nvdx12::transitionBarrier(currentBackBuffer.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  m_graphicsCommandList->ResourceBarrier(1, &presentToRenderTarget);
 
   ComPtr<ID3D12CommandAllocator> guiCommandAllocator = m_guiCommandAllocators[m_swapChain->GetCurrentBackBufferIndex()];
   HR_CHECK(guiCommandAllocator->Reset());
   HR_CHECK(m_guiCommandList->Reset(guiCommandAllocator.Get(), nullptr));
   prepareGui();
 
-  ComPtr<ID3D12Resource> currentBackBuffer = m_backBufferResources[m_swapChain->GetCurrentBackBufferIndex()];
-
-  const D3D12_RESOURCE_BARRIER presentToRenderTarget =
-      nvdx12::transitionBarrier(currentBackBuffer.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-  commandList->ResourceBarrier(1, &presentToRenderTarget);
-
-  const UINT rtvIndex     = m_config.m_alternateFrameRendering ?
-                                m_swapChain->GetCurrentBackBufferIndex() / m_context.m_device->GetNodeCount() :
-                                m_swapChain->GetCurrentBackBufferIndex();
+  const UINT rtvIndex     = m_swapChain->GetCurrentBackBufferIndex();
   const UINT rtvIncrement = m_context.m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
   // Clear background to black
   const float clearColor[4] = {0, 0, 0, 1};
   {
-    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeaps[currentNodeIdx]->GetCPUDescriptorHandleForHeapStart(), rtvIndex, rtvIncrement);
-    commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeap->GetCPUDescriptorHandleForHeapStart(), rtvIndex, rtvIncrement);
+    m_graphicsCommandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
   }
   if(m_config.m_stereo)
   {
-    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeaps[currentNodeIdx]->GetCPUDescriptorHandleForHeapStart(),
+    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeap->GetCPUDescriptorHandleForHeapStart(),
                                             D3D12_SWAP_CHAIN_SIZE + rtvIndex, rtvIncrement);
-    commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+    m_graphicsCommandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
   }
 
   // Draw scrolling lines and a simple present barrier status indicator bar to the window
@@ -443,44 +458,43 @@ void RenderThread::renderFrame()
   m_swapChain->GetDesc1(&swapChainDesc);
   CD3DX12_RECT     scissorRect(0, 0, static_cast<LONG>(swapChainDesc.Width), static_cast<LONG>(swapChainDesc.Height));
   CD3DX12_VIEWPORT viewport(0.0f, 0.0f, static_cast<float>(scissorRect.right), static_cast<float>(scissorRect.bottom));
-  commandList->RSSetScissorRects(1, &scissorRect);
-  commandList->RSSetViewports(1, &viewport);
+  m_graphicsCommandList->RSSetScissorRects(1, &scissorRect);
+  m_graphicsCommandList->RSSetViewports(1, &viewport);
 
   for(UINT eye = 0; eye < (m_config.m_stereo ? 2u : 1u); ++eye)
   {
-    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeaps[currentNodeIdx]->GetCPUDescriptorHandleForHeapStart(),
+    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeap->GetCPUDescriptorHandleForHeapStart(),
                                             rtvIndex + eye * D3D12_SWAP_CHAIN_SIZE, rtvIncrement);
-    commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+    m_graphicsCommandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
 
-    drawLines(commandList, eye);
-    drawSyncIndicator(commandList);
-    drawGui(currentNodeIdx);
+    drawLines(m_graphicsCommandList, eye);
+    drawSyncIndicator(m_graphicsCommandList);
+    drawGui(m_graphicsCommandList);
   }
 
   const D3D12_RESOURCE_BARRIER renderTargetToPresent =
       nvdx12::transitionBarrier(currentBackBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
-  commandList->ResourceBarrier(1, &renderTargetToPresent);
+  m_graphicsCommandList->ResourceBarrier(1, &renderTargetToPresent);
 
   // Finish recording and execute command lists
   HR_CHECK(m_guiCommandList->Close());
   ID3D12CommandList* rawGuiCommandList = m_guiCommandList.Get();
-  m_commandQueues.front()->Wait(m_frameFence.Get(), m_frameIdx);
-  m_commandQueues.front()->ExecuteCommandLists(1, &rawGuiCommandList);
-  m_commandQueues.front()->Signal(m_guiFence.Get(), m_frameIdx + 1);
-  HR_CHECK(commandList->Close());
-  ID3D12CommandList* rawCommandList = commandList.Get();
-  m_commandQueues[currentNodeIdx]->Wait(m_guiFence.Get(), m_frameIdx + 1);
-  m_commandQueues[currentNodeIdx]->ExecuteCommandLists(1, &rawCommandList);
+  m_context.m_commandQueue->Wait(m_frameFence.Get(), m_frameIdx);
+  m_context.m_commandQueue->ExecuteCommandLists(1, &rawGuiCommandList);
+  m_context.m_commandQueue->Signal(m_guiFence.Get(), m_frameIdx + 1);
+  HR_CHECK(m_graphicsCommandList->Close());
+  ID3D12CommandList* rawCommandList = m_graphicsCommandList.Get();
+  m_context.m_commandQueue->Wait(m_guiFence.Get(), m_frameIdx + 1);
+  m_context.m_commandQueue->ExecuteCommandLists(1, &rawCommandList);
 }
 
 void RenderThread::swapBuffers()
 {
   if(!m_skipNextSwap)
   {
-    auto currentNodeIdx = getCurrentNodeIdx();  // must be called before Present()
     m_allocatorFrameIndices[m_swapChain->GetCurrentBackBufferIndex()] = ++m_frameIdx;
     m_swapChain->Present(m_syncInterval, 0);
-    HR_CHECK(m_commandQueues[currentNodeIdx]->Signal(m_frameFence.Get(), m_frameIdx));
+    HR_CHECK(m_context.m_commandQueue->Signal(m_frameFence.Get(), m_frameIdx));
 
     if(!m_config.m_disablePresentBarrier && m_presentBarrierJoined)
     {
@@ -513,7 +527,7 @@ void RenderThread::swapBuffers()
 
   {
     std::lock_guard guard(m_mutex);
-    setDisplayMode(m_requestedDisplayMode);
+    m_requestedDisplayMode = trySetDisplayMode(m_requestedDisplayMode);
     if(m_presentBarrierChangeRequested)
     {
       // sync may cause a present barrier leave on its own
@@ -626,11 +640,13 @@ void RenderThread::forcePresentBarrierChange()
       params.dwVersion                      = NV_JOIN_PRESENT_BARRIER_PARAMS_VER1;
       CHECK_NV(NvAPI_JoinPresentBarrier(m_presentBarrierClient, &params));
       m_presentBarrierJoined = true;
+      LOGD("Present barrier joined.\n");
     }
     else
     {
       CHECK_NV(NvAPI_LeavePresentBarrier(m_presentBarrierClient));
       m_presentBarrierJoined = false;
+      LOGD("Present barrier left.\n");
     }
   }
 }
@@ -673,7 +689,7 @@ void RenderThread::swapResize(int width, int height, bool stereo, bool force)
     swapChainDesc.Flags                 = swapFlags;
 
     ComPtr<IDXGISwapChain1> swapChain1;
-    HR_CHECK(m_context.m_factory->CreateSwapChainForHwnd(m_commandQueues[0].Get(), m_windowCallback->getWindowHandle(),
+    HR_CHECK(m_context.m_factory->CreateSwapChainForHwnd(m_context.m_commandQueue, m_windowCallback->getWindowHandle(),
                                                          &swapChainDesc, nullptr, nullptr, &swapChain1));
     HR_CHECK(swapChain1.As(&m_swapChain));
 
@@ -686,44 +702,23 @@ void RenderThread::swapResize(int width, int height, bool stereo, bool force)
       CHECK_NV(NvAPI_D3D12_CreatePresentBarrierClient(m_context.m_device, m_swapChain.Get(), &m_presentBarrierClient));
     }
   }
-  else if(!m_config.m_alternateFrameRendering)
+  else
   {
     HR_CHECK(m_swapChain->ResizeBuffers(D3D12_SWAP_CHAIN_SIZE, width, height, DXGI_FORMAT_UNKNOWN, swapFlags));
   }
 
-  const UINT nodeCount = m_context.m_device->GetNodeCount();
-
-  // Configure swap chain for alternative frame rendering (back buffer resources distributed across nodes in the device)
-  if(m_config.m_alternateFrameRendering)
-  {
-    const UINT             bufferCount = D3D12_SWAP_CHAIN_SIZE * nodeCount;
-    std::vector<UINT>      nodeMasks(bufferCount, 0);
-    std::vector<IUnknown*> nodeQueues(bufferCount, nullptr);
-    for(UINT i = 0; i < D3D12_SWAP_CHAIN_SIZE; ++i)
-    {
-      for(UINT k = 0; k < nodeCount; ++k)
-      {
-        nodeMasks[i * nodeCount + k]  = 1 << k;
-        nodeQueues[i * nodeCount + k] = m_commandQueues[k].Get();
-      }
-    }
-    HR_CHECK(m_swapChain->ResizeBuffers1(bufferCount, width, height, DXGI_FORMAT_UNKNOWN, swapFlags, nodeMasks.data(),
-                                         nodeQueues.data()));
-    m_backBufferResources.resize(bufferCount);
-  }
-  else
-  {
-    m_backBufferResources.resize(D3D12_SWAP_CHAIN_SIZE);
-  }
+  m_backBufferResources.resize(D3D12_SWAP_CHAIN_SIZE);
 
   // get back buffers and create render target views
   const UINT rtvIncrement = m_context.m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
   for(UINT i = 0; i < m_backBufferResources.size(); ++i)
   {
     HR_CHECK(m_swapChain->GetBuffer(i, IID_PPV_ARGS(&m_backBufferResources[i])));
-
-    const UINT rtvIndex  = m_config.m_alternateFrameRendering ? i / nodeCount : i;
-    const UINT nodeIndex = m_config.m_alternateFrameRendering ? i % nodeCount : 0;
+    char    name[128];
+    int     n = snprintf(name, sizeof(name), "backbuffer_%d", i);
+    wchar_t wname[128];
+    size_t  r = mbstowcs(wname, name, n + 1);
+    HR_CHECK(m_backBufferResources[i]->SetName(wname));
 
     D3D12_RENDER_TARGET_VIEW_DESC rtvDesc;
     rtvDesc.Format = BACK_BUFFER_FORMAT;
@@ -742,7 +737,7 @@ void RenderThread::swapResize(int width, int height, bool stereo, bool force)
       rtvDesc.Texture2DArray.PlaneSlice      = 0;
     }
 
-    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeaps[nodeIndex]->GetCPUDescriptorHandleForHeapStart(), rtvIndex, rtvIncrement);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeap->GetCPUDescriptorHandleForHeapStart(), i, rtvIncrement);
     m_context.m_device->CreateRenderTargetView(m_backBufferResources[i].Get(), &rtvDesc, rtvHandle);
 
     if(m_config.m_stereo)
@@ -755,7 +750,7 @@ void RenderThread::swapResize(int width, int height, bool stereo, bool force)
 
   // set up gui texture
   m_guiTexture.Reset();
-  CD3DX12_HEAP_PROPERTIES guiTexHeapProps(D3D12_HEAP_TYPE_DEFAULT, 1, (1 << nodeCount) - 1);
+  CD3DX12_HEAP_PROPERTIES guiTexHeapProps(D3D12_HEAP_TYPE_DEFAULT);
   CD3DX12_RESOURCE_DESC   guiTexDesc(D3D12_RESOURCE_DIMENSION_TEXTURE2D, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
                                      width, height, 1, 1, BACK_BUFFER_FORMAT, 1, 0, D3D12_TEXTURE_LAYOUT_UNKNOWN,
                                      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
@@ -763,19 +758,18 @@ void RenderThread::swapResize(int width, int height, bool stereo, bool force)
   CD3DX12_CLEAR_VALUE     guiTexClearValue(guiTexDesc.Format, black);
   HR_CHECK(m_context.m_device->CreateCommittedResource(&guiTexHeapProps, D3D12_HEAP_FLAG_NONE, &guiTexDesc, D3D12_RESOURCE_STATE_RENDER_TARGET,
                                                        &guiTexClearValue, IID_PPV_ARGS(&m_guiTexture)));
+  m_guiTexture->SetName(L"gui_texture");
   D3D12_SHADER_RESOURCE_VIEW_DESC guiTexSrvDesc = {};
   guiTexSrvDesc.Format                          = guiTexDesc.Format;
   guiTexSrvDesc.ViewDimension                   = D3D12_SRV_DIMENSION_TEXTURE2D;
   guiTexSrvDesc.Shader4ComponentMapping         = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
   guiTexSrvDesc.Texture2D.MipLevels             = 1;
-  for(auto& heap : m_cbvSrvUavHeaps)
-  {
-    m_context.m_device->CreateShaderResourceView(m_guiTexture.Get(), &guiTexSrvDesc, heap->GetCPUDescriptorHandleForHeapStart());
-  }
+  m_context.m_device->CreateShaderResourceView(m_guiTexture.Get(), &guiTexSrvDesc,
+                                               m_cbvSrvUavHeap->GetCPUDescriptorHandleForHeapStart());
   D3D12_RENDER_TARGET_VIEW_DESC guiTexRtvDesc = {};
   guiTexRtvDesc.Format                        = guiTexDesc.Format;
   guiTexRtvDesc.ViewDimension                 = D3D12_RTV_DIMENSION_TEXTURE2D;
-  auto guiRtvCpuHandle                        = m_rtvHeaps.front()->GetCPUDescriptorHandleForHeapStart();
+  auto guiRtvCpuHandle                        = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
   guiRtvCpuHandle.ptr +=
       D3D12_SWAP_CHAIN_SIZE * 2 * m_context.m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
   m_context.m_device->CreateRenderTargetView(m_guiTexture.Get(), &guiTexRtvDesc, guiRtvCpuHandle);
@@ -790,7 +784,7 @@ void RenderThread::swapResize(int width, int height, bool stereo, bool force)
 
     // Register the new back buffer resources
     CHECK_NV(NvAPI_D3D12_RegisterPresentBarrierResources(m_presentBarrierClient, m_presentBarrierFence.Get(),
-                                                         rawBackBuffers.data(), static_cast<NvU32>(m_backBufferResources.size())));
+                                                         rawBackBuffers.data(), static_cast<NvU32>(rawBackBuffers.size())));
   }
 }
 
@@ -798,12 +792,6 @@ void RenderThread::toggleStereo()
 {
   std::lock_guard guard(m_mutex);
   m_requestToggleStereo = !m_requestToggleStereo;
-}
-
-void RenderThread::toggleScrolling()
-{
-  std::lock_guard guard(m_mutex);
-  m_config.m_scrolling = !m_config.m_scrolling;
 }
 
 void RenderThread::toggleQuadroSync()
@@ -816,11 +804,6 @@ void RenderThread::setVsync(bool enabled)
 {
   std::lock_guard guard(m_mutex);
   m_syncInterval = enabled ? 1 : 0;
-}
-
-std::uint32_t RenderThread::getCurrentNodeIdx()
-{
-  return m_config.m_alternateFrameRendering ? m_swapChain->GetCurrentBackBufferIndex() % m_context.m_device->GetNodeCount() : 0;
 }
 
 void RenderThread::drawLines(ComPtr<ID3D12GraphicsCommandList> commandList, uint32_t offset)
@@ -872,9 +855,11 @@ void RenderThread::drawLines(ComPtr<ID3D12GraphicsCommandList> commandList, uint
   }
 
   // Update line offset based on the current frame count and speed
-  constants.verticalOffset = ((m_frameCount * m_config.m_lineSpeedInPixels) % width) / static_cast<float>(width);
+  constants.verticalOffset =
+      (((m_frameCount - m_linesPosOffset) * m_config.m_lineSpeedInPixels) % width) / static_cast<float>(width);
   constants.verticalOffset += offset * constants.verticalSizeB;
-  constants.horizontalOffset = ((m_frameCount * m_config.m_lineSpeedInPixels) % height) / static_cast<float>(height);
+  constants.horizontalOffset =
+      (((m_frameCount - m_linesPosOffset) * m_config.m_lineSpeedInPixels) % height) / static_cast<float>(height);
   constants.horizontalOffset += offset * constants.horizontalSizeB;
 
   // Calculate spacing between lines so that they appear as a grid of squares
@@ -893,26 +878,31 @@ void RenderThread::drawLines(ComPtr<ID3D12GraphicsCommandList> commandList, uint
 
 void RenderThread::drawSyncIndicator(ComPtr<ID3D12GraphicsCommandList> commandList)
 {
-  float color[3];
-  switch(m_presentBarrierFrameStats.SyncMode)
+  float color[3] = {0.25f, 0.25f, 0.25f};  // gray
+  if(m_presentBarrierJoined)
   {
-    default:
-    case PRESENT_BARRIER_NOT_JOINED:  // red
-      color[0] = 1.0f;
-      color[1] = 0.0f;
-      color[2] = 0.0f;
-      break;
-    case PRESENT_BARRIER_SYNC_CLIENT:  // yellow
-      color[0] = 1.0f;
-      color[1] = 1.0f;
-      color[2] = 0.1f;
-      break;
-    case PRESENT_BARRIER_SYNC_SYSTEM:
-    case PRESENT_BARRIER_SYNC_CLUSTER:  // green
-      color[0] = 0.462f;
-      color[1] = 0.725f;
-      color[2] = 0.0f;
-      break;
+    switch(m_presentBarrierFrameStats.SyncMode)
+    {
+      case PRESENT_BARRIER_NOT_JOINED:  // red
+        color[0] = 1.0f;
+        color[1] = 0.0f;
+        color[2] = 0.0f;
+        break;
+      case PRESENT_BARRIER_SYNC_CLIENT:  // yellow
+        color[0] = 1.0f;
+        color[1] = 1.0f;
+        color[2] = 0.1f;
+        break;
+      case PRESENT_BARRIER_SYNC_SYSTEM:
+      case PRESENT_BARRIER_SYNC_CLUSTER:  // green
+        color[0] = 0.462f;
+        color[1] = 0.725f;
+        color[2] = 0.0f;
+        break;
+      default:
+        LOGW("Unknown present barrier sync mode: 0x%08x.\n", m_presentBarrierFrameStats.SyncMode);
+        break;
+    }
   }
 
   commandList->SetPipelineState(m_indicatorPipeline.Get());
@@ -929,54 +919,62 @@ void RenderThread::prepareGui()
   ImGui::Begin("Present barrier stats");
   ImGui::SetWindowSize({240, 120});
   ImGui::SetWindowPos({0, 0});
-  if(ImGui::BeginTable("table", 2, ImGuiTableFlags_SizingStretchProp))
+  if(m_presentBarrierJoined)
   {
-    ImGui::TableNextColumn();
-    ImGui::Text("SyncMode");
-    ImGui::TableNextColumn();
-    switch(m_presentBarrierFrameStats.SyncMode)
+    if(ImGui::BeginTable("table", 2, ImGuiTableFlags_SizingStretchProp))
     {
-      case PRESENT_BARRIER_NOT_JOINED:
-        ImGui::Text("NOT_JOINED");
-        break;
-      case PRESENT_BARRIER_SYNC_CLIENT:
-        ImGui::Text("SYNC_CLIENT");
-        break;
-      case PRESENT_BARRIER_SYNC_SYSTEM:
-        ImGui::Text("SYNC_SYSTEM");
-        break;
-      case PRESENT_BARRIER_SYNC_CLUSTER:
-        ImGui::Text("SYNC_CLUSTER");
-        break;
-      default:
-        ImGui::Text("0x%08x", m_presentBarrierFrameStats.SyncMode);
-        break;
+      ImGui::TableNextColumn();
+      ImGui::Text("SyncMode");
+      ImGui::TableNextColumn();
+      switch(m_presentBarrierFrameStats.SyncMode)
+      {
+        case PRESENT_BARRIER_NOT_JOINED:
+          ImGui::Text("NOT_JOINED");
+          break;
+        case PRESENT_BARRIER_SYNC_CLIENT:
+          ImGui::Text("SYNC_CLIENT");
+          break;
+        case PRESENT_BARRIER_SYNC_SYSTEM:
+          ImGui::Text("SYNC_SYSTEM");
+          break;
+        case PRESENT_BARRIER_SYNC_CLUSTER:
+          ImGui::Text("SYNC_CLUSTER");
+          break;
+        default:
+          ImGui::Text("0x%08x", m_presentBarrierFrameStats.SyncMode);
+          break;
+      }
+      ImGui::TableNextColumn();
+      ImGui::Text("PresentCount");
+      ImGui::TableNextColumn();
+      ImGui::Text("%d", m_presentBarrierFrameStats.PresentCount);
+      ImGui::TableNextColumn();
+      ImGui::Text("PresentInSyncCount");
+      ImGui::TableNextColumn();
+      ImGui::Text("%d", m_presentBarrierFrameStats.PresentInSyncCount);
+      ImGui::TableNextColumn();
+      ImGui::Text("FlipInSyncCount");
+      ImGui::TableNextColumn();
+      ImGui::Text("%d", m_presentBarrierFrameStats.FlipInSyncCount);
+      ImGui::TableNextColumn();
+      ImGui::Text("RefreshCount");
+      ImGui::TableNextColumn();
+      ImGui::Text("%d", m_presentBarrierFrameStats.RefreshCount);
+      ImGui::EndTable();
     }
-    ImGui::TableNextColumn();
-    ImGui::Text("PresentCount");
-    ImGui::TableNextColumn();
-    ImGui::Text("%d", m_presentBarrierFrameStats.PresentCount);
-    ImGui::TableNextColumn();
-    ImGui::Text("PresentInSyncCount");
-    ImGui::TableNextColumn();
-    ImGui::Text("%d", m_presentBarrierFrameStats.PresentInSyncCount);
-    ImGui::TableNextColumn();
-    ImGui::Text("FlipInSyncCount");
-    ImGui::TableNextColumn();
-    ImGui::Text("%d", m_presentBarrierFrameStats.FlipInSyncCount);
-    ImGui::TableNextColumn();
-    ImGui::Text("RefreshCount");
-    ImGui::TableNextColumn();
-    ImGui::Text("%d", m_presentBarrierFrameStats.RefreshCount);
-    ImGui::EndTable();
+  }
+  else
+  {
+    ImGui::Text("Present barrier is turned off.");
+    ImGui::Text("Press T to turn it on.");
   }
   ImGui::End();
 
   ImGui::Render();
 
-  auto cbvSrvUavHeap = m_cbvSrvUavHeaps.front().Get();
+  auto cbvSrvUavHeap = m_cbvSrvUavHeap.Get();
   m_guiCommandList->SetDescriptorHeaps(1, &cbvSrvUavHeap);
-  auto guiRtvHandle = m_rtvHeaps.front()->GetCPUDescriptorHandleForHeapStart();
+  auto guiRtvHandle = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
   guiRtvHandle.ptr +=
       D3D12_SWAP_CHAIN_SIZE * 2 * m_context.m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
   FLOAT guiClearColor[] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -985,15 +983,20 @@ void RenderThread::prepareGui()
   ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), m_guiCommandList.Get());
 }
 
-void RenderThread::drawGui(unsigned int currentNodeIdx)
+void RenderThread::drawGui(ComPtr<ID3D12GraphicsCommandList> commandList)
 {
-  auto commandList = m_commandLists[currentNodeIdx];
   commandList->SetPipelineState(m_guiPipeline.Get());
-  commandList->SetGraphicsRootDescriptorTable(1, m_cbvSrvUavHeaps[currentNodeIdx]->GetGPUDescriptorHandleForHeapStart());
+  commandList->SetGraphicsRootDescriptorTable(1, m_cbvSrvUavHeap->GetGPUDescriptorHandleForHeapStart());
+  D3D12_RESOURCE_BARRIER rt2psBarrier = nvdx12::transitionBarrier(m_guiTexture.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                                                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+  commandList->ResourceBarrier(1, &rt2psBarrier);
   commandList->DrawInstanced(3, 1, 0, 0);
+  D3D12_RESOURCE_BARRIER ps2rtBarrier =
+      nvdx12::transitionBarrier(m_guiTexture.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+  commandList->ResourceBarrier(1, &ps2rtBarrier);
 }
 
-void RenderThread::setDisplayMode(DisplayMode displayMode)
+DisplayMode RenderThread::trySetDisplayMode(DisplayMode displayMode)
 {
   BOOL fullscreen;
   HR_CHECK(m_swapChain->GetFullscreenState(&fullscreen, nullptr));
@@ -1003,7 +1006,7 @@ void RenderThread::setDisplayMode(DisplayMode displayMode)
   }
   if(displayMode == m_displayMode)
   {
-    return;
+    return m_displayMode;
   }
 
   ComPtr<IDXGIOutput> output;
@@ -1011,7 +1014,16 @@ void RenderThread::setDisplayMode(DisplayMode displayMode)
   // Get output for borderless and fullscreen
   if(m_config.m_outputIndex == -1)
   {
-    HR_CHECK(m_swapChain->GetContainingOutput(&output));
+    HRESULT hr = m_swapChain->GetContainingOutput(&output);
+    if(hr == DXGI_ERROR_UNSUPPORTED)
+    {
+      LOGW(
+          "GetContainingOutput() returned DXGI_ERROR_UNSUPPORTED. You should see the following message in the debug "
+          "console if D3D/DXGI debug layers are enabled: The swapchain's adapter does not control the output on which "
+          "the swapchain's window resides.\n");
+      return m_displayMode;
+    }
+    HR_CHECK(hr);
   }
   else
   {
@@ -1074,6 +1086,7 @@ void RenderThread::setDisplayMode(DisplayMode displayMode)
 
   // Some display mode transitions are not detected by GLFW, so force resize
   swapResize(modeDesc.Width, modeDesc.Height, m_config.m_stereo, true);
+  return m_displayMode;
 }
 
 void RenderThread::releasePresentBarrier()
@@ -1104,22 +1117,17 @@ void RenderThread::end()
   m_indicatorPipeline.Reset();
   m_linesPipeline.Reset();
   m_rootSignature.Reset();
-  m_rtvHeaps.clear();
-  m_cbvSrvUavHeaps.clear();
+  m_rtvHeap.Reset();
+  m_cbvSrvUavHeap.Reset();
   m_guiCommandList.Reset();
-  m_commandLists.clear();
+  m_graphicsCommandList.Reset();
   m_guiCommandAllocators.clear();
-  m_commandAllocators.clear();
+  m_graphicsCommandAllocators.clear();
   CloseHandle(m_syncEvt);
   m_guiFence.Reset();
   m_frameFence.Reset();
   m_presentBarrierFence.Reset();
   m_backBufferResources.clear();
-  for(auto queue : m_commandQueues)
-  {
-    queue->Release();
-  }
-  m_commandQueues.clear();
   m_swapChain.Reset();
   m_context.deinit();
 }

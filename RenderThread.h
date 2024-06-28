@@ -5,6 +5,7 @@
 
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <d3dx12.h>
 #include <wrl/client.h>
@@ -29,7 +30,6 @@ struct Configuration
   std::string   m_startupDisplayMode          = "b";
   std::string   m_testMode                    = "n";
   std::string   m_frameCounterFilePath        = "";
-  bool          m_alternateFrameRendering     = false;
   bool          m_disablePresentBarrier       = false;
   bool          m_stereo                      = false;
   bool          m_showVerticalLines           = true;
@@ -62,31 +62,41 @@ public:
   RenderThread();
   ~RenderThread() {}
 
-  bool start(Configuration const& initialConfig, WindowCallback* windowCallback);
-  void interruptAndJoin();
-  void setDisplayMode(DisplayMode displayMode);
-  void setSleepInterval(std::uint32_t millis);
-  void changeSleepInterval(std::int32_t deltaMillis);
-  void toggleStereo();
-  void toggleScrolling();
-  void toggleQuadroSync();
-  void setVsync(bool enabled);
-  void requestBorderlessStateChange();
-  void requestFullscreenStateChange();
-  bool requestPresentBarrierChange(std::uint32_t maxWaitMillis);
-  void requestResetFrameCount();
-  void forcePresentBarrierChange();
+  bool        start(Configuration const& initialConfig, WindowCallback* windowCallback);
+  void        togglePaused();
+  void        interruptAndJoin();
+  DisplayMode trySetDisplayMode(DisplayMode displayMode);
+  void        setSleepInterval(std::uint32_t millis);
+  void        changeSleepInterval(std::int32_t deltaMillis);
+  void        toggleStereo();
+  void        toggleQuadroSync();
+  void        setVsync(bool enabled);
+  void        requestBorderlessStateChange();
+  void        requestFullscreenStateChange();
+  bool        requestPresentBarrierChange(std::uint32_t maxWaitMillis);
+  void        requestResetFrameCount();
+  void        forcePresentBarrierChange();
 
   nvdx12::ContextCreateInfo& contextInfo() { return m_contextInfo; }
 
 private:
+  enum class Status
+  {
+    CREATED,
+    INITIAZATION_ERROR,
+    RUNNING,
+    PAUSED,
+    INTERRUPTED,
+  };
+
   std::thread             m_thread;
+  Status                  m_status = Status::CREATED;
   std::mutex              m_mutex;
   std::condition_variable m_conVar;
-  bool                    m_interrupted    = false;
   WindowCallback*         m_windowCallback = nullptr;
 
   Configuration m_config;
+  NvU32         m_linesPosOffset         = 0;
   bool          m_requestToggleStereo    = false;
   bool          m_requestResetFrameCount = false;
   bool          m_skipNextSwap           = false;
@@ -101,18 +111,17 @@ private:
   UINT64              m_frameIdx = 0;
   HANDLE              m_syncEvt  = NULL;
 
-  ComPtr<IDXGISwapChain3>                   m_swapChain;
-  std::vector<ComPtr<ID3D12Resource>>       m_backBufferResources;
-  ComPtr<ID3D12Resource>                    m_guiTexture;
-  std::vector<ComPtr<ID3D12DescriptorHeap>> m_rtvHeaps;
-  std::vector<ComPtr<ID3D12DescriptorHeap>> m_cbvSrvUavHeaps;
+  ComPtr<IDXGISwapChain3>             m_swapChain;
+  std::vector<ComPtr<ID3D12Resource>> m_backBufferResources;
+  ComPtr<ID3D12Resource>              m_guiTexture;
+  ComPtr<ID3D12DescriptorHeap>        m_rtvHeap;
+  ComPtr<ID3D12DescriptorHeap>        m_cbvSrvUavHeap;
 
-  std::vector<ComPtr<ID3D12CommandQueue>>        m_commandQueues;
-  std::vector<ComPtr<ID3D12GraphicsCommandList>> m_commandLists;
-  std::vector<ComPtr<ID3D12CommandAllocator>>    m_commandAllocators;
-  std::vector<UINT64>                            m_allocatorFrameIndices;
-  ComPtr<ID3D12GraphicsCommandList>              m_guiCommandList;
-  std::vector<ComPtr<ID3D12CommandAllocator>>    m_guiCommandAllocators;
+  ComPtr<ID3D12GraphicsCommandList>           m_graphicsCommandList;
+  std::vector<ComPtr<ID3D12CommandAllocator>> m_graphicsCommandAllocators;
+  ComPtr<ID3D12GraphicsCommandList>           m_guiCommandList;
+  std::vector<ComPtr<ID3D12CommandAllocator>> m_guiCommandAllocators;
+  std::vector<UINT64>                         m_allocatorFrameIndices;
 
   NvPresentBarrierClientHandle m_presentBarrierClient = nullptr;
 
@@ -129,20 +138,20 @@ private:
   NvU32                               m_syncInterval                  = 0;
   NV_PRESENT_BARRIER_FRAME_STATISTICS m_presentBarrierFrameStats      = {};
 
-  void run();
   bool isInterrupted();
 
-  bool          init(unsigned int initialWidth, unsigned int initialHeight);
-  std::uint32_t getCurrentNodeIdx();
-  void          renderFrame();
-  void          swapResize(int width, int height, bool stereo, bool force);
-  void          swapBuffers();
-  bool          sync();
-  void          end();
-  void          releasePresentBarrier();
+  bool init(unsigned int initialWidth, unsigned int initialHeight);
+  void setStatus(Status newStatus);
+  void waitIfPaused();
+  void renderFrame();
+  void swapResize(int width, int height, bool stereo, bool force);
+  void swapBuffers();
+  bool sync();
+  void end();
+  void releasePresentBarrier();
 
   void drawLines(ComPtr<ID3D12GraphicsCommandList> commandList, uint32_t offset = 0);
   void drawSyncIndicator(ComPtr<ID3D12GraphicsCommandList> commandList);
-  void drawGui(unsigned int currentNodeIdx);
+  void drawGui(ComPtr<ID3D12GraphicsCommandList> commandList);
   void prepareGui();
 };

@@ -60,7 +60,6 @@ Sample::Sample()
   m_parameterList.add("dm|Same as -displaymode", &m_initialConfig.m_startupDisplayMode);
   m_parameterList.add("adapter|Adapter index to render on", &m_renderThread.contextInfo().compatibleAdapterIndex);
   m_parameterList.add("a|Same as -adapter", &m_renderThread.contextInfo().compatibleAdapterIndex);
-  m_parameterList.add("afr|Alternate frame rendering when SLI is enabled", &m_initialConfig.m_alternateFrameRendering);
   m_parameterList.add("listadapters|Print available adapters", &m_renderThread.contextInfo().verboseCompatibleAdapters);
   m_parameterList.add("dpb|Disable present barrier", &m_initialConfig.m_disablePresentBarrier);
   m_parameterList.add("stereo|Stereoscopic rendering", &m_initialConfig.m_stereo);
@@ -102,11 +101,12 @@ bool Sample::begin()
       "\n"
       "Version %d.%d"
       "\n"
-      "build " BUILD_STRING "%s"
+      "build " BUILD_STRING
+      "%s"
       "\n\n"
       "Keyboard shortcuts:\n"
       " V          - Toggle vsync\n"
-      " S          - Toggle scrolling of the lines\n"
+      " S          - Stop/resume rendering\n"
       " T          - Toggle present barrier\n"
       " Q          - Toggle usage of the Quadro Sync frame counter\n"
       " R          - Reset frame counter (only works from timing server)\n"
@@ -118,6 +118,7 @@ bool Sample::begin()
       " 2          - Toggle stereoscopic rendering\n"
       "\n"
       "The bar at the top of the window indicates the present barrier status:\n"
+      " gray       - Present barrier is toggled off\n"
       " red        - The swap chain is not in present barrier sync\n"
       " yellow     - The swap chain is in present barrier sync with other clients on the local system\n"
       " green      - The swap chain is in present barrier sync across systems through framelock\n"
@@ -161,7 +162,7 @@ void Sample::think(double time)
   }
   if(m_windowState.onPress(KEY_S))
   {
-    m_renderThread.toggleScrolling();
+    m_renderThread.togglePaused();
   }
   if(m_windowState.onPress(KEY_Q))
   {
