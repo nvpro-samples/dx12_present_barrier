@@ -34,47 +34,7 @@ _add_project_definitions(${PROJNAME})
 set(EXENAME ${PROJNAME})
 _add_package_DirectX12()
 _add_package_ImGUI()
-
-find_path(NVAPI_INCLUDE_DIRS nvapi.h
-  ${PROJECT_SOURCE_DIR}/nvpro_internal/NVAPI
-  ${PROJECT_SOURCE_DIR}/../nvpro_internal/NVAPI
-  ${PROJECT_SOURCE_DIR}/../../nvpro_internal/NVAPI
-  ${PROJECT_SOURCE_DIR}/../../../nvpro_internal/NVAPI
-  ${PROJECT_SOURCE_DIR}/../../../../nvpro_internal/NVAPI
-  ${NVAPI_LOCATION}
-  $ENV{NVAPI_LOCATION}
-)
-
-if(NVAPI_INCLUDE_DIRS)
-  if(WIN32)
-    set(NVAPI_FOUND ON)
-    set(NVAPI_HEADERS "${NVAPI_INCLUDE_DIRS}/nvapi.h")
-
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-      set(NVAPI_LIBRARIES "${NVAPI_INCLUDE_DIRS}/amd64/nvapi64.lib")
-    else()
-      set(NVAPI_LIBRARIES "${NVAPI_INCLUDE_DIRS}/x86/nvapi.lib")
-    endif()
-  endif()
-else(NVAPI_INCLUDE_DIRS)
-  message(FATAL_ERROR "NVAPI not found!
-You can specify the location of the NVAPI directory with a NVAPI_LOCATION variable. The directory should contain:
-  - nvapi.h header file
-  - amd64/x86 folders containing nvapi[64].lib")
-endif(NVAPI_INCLUDE_DIRS)
-
-if(NVAPI_FOUND)
-  file(READ ${NVAPI_HEADERS} NVAPI_HEADERS_CONTENT)
-  string(FIND "${NVAPI_HEADERS_CONTENT}" "NvAPI_D3D12_QueryPresentBarrierSupport" NVAPI_HEADERS_SEARCH_RESULT)
-
-  if(NVAPI_HEADERS_SEARCH_RESULT EQUAL -1)
-    message(WARNING "Could not find the required present barrier functions in nvapi.h. Given NVAPI version may be too low. Please make sure NVAPI_INCLUDE_DIRS points to R470 or newer.")
-  endif(NVAPI_HEADERS_SEARCH_RESULT EQUAL -1)
-
-  include_directories(${NVAPI_INCLUDE_DIRS})
-  LIST(APPEND LIBRARIES_OPTIMIZED ${NVAPI_LIBRARIES})
-  LIST(APPEND LIBRARIES_DEBUG ${NVAPI_LIBRARIES})
-endif()
+_add_package_NVAPI()
 
 # ####################################################################################
 # process the rest of some cmake code that needs to be done *after* the packages add
@@ -90,14 +50,6 @@ file(GLOB HLSL_VERTEX_SHADER_FILES shaders/indicator_vs.hlsl shaders/line_vs.hls
 # ####################################################################################
 # Executable
 #
-if(WIN32 AND NOT GLUT_FOUND)
-  add_definitions(/wd4996) # remove printf warning
-  add_definitions(/wd4244) # remove double to float conversion warning
-  add_definitions(/wd4305) # remove double to float truncation warning
-else()
-  add_definitions(-fpermissive)
-endif()
-
 set_property(SOURCE ${HLSL_PIXEL_SHADER_FILES} PROPERTY VS_SHADER_TYPE Pixel)
 set_property(SOURCE ${HLSL_PIXEL_SHADER_FILES} PROPERTY VS_SHADER_MODEL 5.0)
 set_property(SOURCE ${HLSL_VERTEX_SHADER_FILES} PROPERTY VS_SHADER_TYPE Vertex)
